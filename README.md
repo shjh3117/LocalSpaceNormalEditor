@@ -2,7 +2,7 @@
 
 A Blender addon for editing custom normals in local space with an intuitive spherical picker interface.
 
-![Spherical Picker](screenshot.png)
+![Spherical Picker](Screenshot.png)
 
 ## Features
 
