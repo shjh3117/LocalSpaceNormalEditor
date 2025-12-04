@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (1, 1, 0),
+    "version": (0, 0, 2),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
