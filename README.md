@@ -5,6 +5,10 @@ A Blender addon for editing custom normals in local space with an interactive sp
 ![Blender](https://img.shields.io/badge/Blender-4.1%2B-orange)
 ![License](https://img.shields.io/badge/License-GPL--2.0--or--later-blue)
 
+## Screenshot
+
+![Spherical Picker](Screenshot.png)
+
 ## Features
 
 - **Interactive Spherical Picker**: Visual sphere widget for intuitive normal direction selection
