@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 2),
+    "version": (0, 0, 3),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -179,6 +179,11 @@ class LocalNormalSettings(bpy.types.PropertyGroup):
         description="Snap angles to 15° increments",
         default=True,
     )
+    auto_mark_sharp: BoolProperty(
+        name="Auto Mark Sharp",
+        description="Automatically mark selected edges as sharp when applying normals",
+        default=True,
+    )
     mirror_axis: EnumProperty(
         name="Mirror",
         description="Mirror edit to opposite side",
@@ -351,6 +356,10 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         mesh = obj.data
         normal = spherical_to_vector(self._yaw, self._pitch)
         settings = context.scene.local_normal_editor
+
+        # Auto mark sharp on selected edges if enabled
+        if settings.auto_mark_sharp:
+            bpy.ops.mesh.mark_sharp()
 
         bpy.ops.object.mode_set(mode='OBJECT')
         normals = [Vector(cn.vector) for cn in mesh.corner_normals]
@@ -575,6 +584,7 @@ class VIEW3D_PT_local_normal_editor(bpy.types.Panel):
         
         col = layout.column(align=True)
         col.prop(settings, "use_snap")
+        col.prop(settings, "auto_mark_sharp")
         col.prop(settings, "mirror_axis")
 
         layout.separator()
