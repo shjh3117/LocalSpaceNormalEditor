@@ -1,18 +1,19 @@
 # Local Space Normal Editor
 
-A Blender addon for editing custom normals in local space with intuitive directional controls.
+A Blender addon for editing custom normals in local space with an interactive spherical picker.
 
 ![Blender](https://img.shields.io/badge/Blender-4.1%2B-orange)
 ![License](https://img.shields.io/badge/License-GPL--2.0--or--later-blue)
 
 ## Features
 
-- **Intuitive Direction Grid**: Set normals using a 3x3 directional grid (front view perspective)
-- **Custom Direction**: Specify any custom normal direction
-- **Spherical Control**: Yaw/Pitch sliders with optional 15° snapping for full 360° coverage
-- **Copy from Active Face**: Copy the normal from the active face to all selected faces
-- **Average Normals**: Average the normals of selected vertices
+- **Interactive Spherical Picker**: Visual sphere widget for intuitive normal direction selection
+  - Real-time preview - changes apply immediately as you drag
+  - Front/Back hemisphere toggle (press `F` to flip)
+  - 15° angle snapping (optional)
+  - Cancel to restore original normals
 - **Clear Custom Normals**: Remove custom normals and restore defaults
+- **Normal Display Settings**: Quick access to split normal visualization
 
 ## Installation
 
@@ -26,22 +27,22 @@ A Blender addon for editing custom normals in local space with intuitive directi
 1. Select a mesh object and enter **Edit Mode**
 2. Select the faces you want to modify
 3. Open the sidebar (press `N`) and find the **Edit** tab
-4. Use the **Local Normal Editor** panel:
+4. Click **Spherical Picker** in the **Local Normal Editor** panel
 
-### Direction Grid
-```
-  ↖  ↑  ↗
-  ←  ●  →
-  ↙  ↓  ↘
-```
-- **●** (center): Front direction (facing camera)
-- **Arrows**: Diagonal and cardinal directions
+### Spherical Picker Controls
 
-### Tools
-- **Spherical Control**: Adjust yaw/pitch sliders (snap in 15° steps) and click *Apply Spherical Normal*
-- **Copy from Active Face**: Copies the active face's normal to all selected faces
-- **Average Normals**: Averages normals of selected vertices
-- **Clear Custom Normals**: Removes all custom normal data
+| Action | Description |
+|--------|-------------|
+| **Drag** on sphere | Set normal direction (applies immediately) |
+| **F** | Flip between front/back hemisphere |
+| **Enter** | Confirm and close |
+| **Esc** | Cancel and restore original normals |
+
+### Tips
+
+- Enable **Snap 15°** for precise angle increments
+- Use **Normal Display** panel to visualize split normals
+- The sphere color changes: blue = front, red = back hemisphere
 
 ## Requirements
 
