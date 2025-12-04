@@ -16,6 +16,8 @@ A Blender addon for editing custom normals in local space with an interactive sp
   - Front/Back hemisphere toggle (press `F` to flip)
   - 15° angle snapping (optional)
   - Cancel to restore original normals
+- **Mirror Editing**: Edit normals symmetrically across X, Y, or Z axis
+  - Automatically finds and updates opposite side faces
 - **Clear Custom Normals**: Remove custom normals and restore defaults
 - **Normal Display Settings**: Quick access to split normal visualization
 
@@ -45,6 +47,7 @@ A Blender addon for editing custom normals in local space with an interactive sp
 ### Tips
 
 - Enable **Snap 15°** for precise angle increments
+- Enable **Mirror (X/Y/Z)** to edit both sides symmetrically
 - Use **Normal Display** panel to visualize split normals
 - The sphere color changes: blue = front, red = back hemisphere
 
