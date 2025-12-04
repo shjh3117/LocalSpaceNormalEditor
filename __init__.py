@@ -20,6 +20,7 @@ from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 from bpy.props import (
     BoolProperty,
+    EnumProperty,
     FloatProperty,
     PointerProperty,
 )
@@ -54,6 +55,57 @@ def vector_to_spherical(vec: Vector):
     return yaw, pitch
 
 
+def find_mirror_loops(bm, selected_loops, axis='X', threshold=0.001):
+    """Find mirrored loop indices for selected loops based on face center matching"""
+    axis_idx = {'X': 0, 'Y': 1, 'Z': 2}[axis]
+    mirror_map = {}  # original_loop_idx -> mirror_loop_idx
+    
+    # Get selected faces
+    selected_faces = [f for f in bm.faces if f.select]
+    
+    # Build face center to face map for non-selected faces
+    other_faces = [f for f in bm.faces if not f.select]
+    
+    for sel_face in selected_faces:
+        # Calculate mirrored face center
+        face_center = sel_face.calc_center_median()
+        mirror_center = face_center.copy()
+        mirror_center[axis_idx] = -mirror_center[axis_idx]
+        
+        # Find matching face on the other side
+        best_match = None
+        best_dist = threshold
+        for other_face in other_faces:
+            other_center = other_face.calc_center_median()
+            dist = (other_center - mirror_center).length
+            if dist < best_dist:
+                best_dist = dist
+                best_match = other_face
+        
+        if best_match is None:
+            continue
+        
+        # Match loops between the two faces by mirrored vertex positions
+        for sel_loop in sel_face.loops:
+            sel_vert_co = sel_loop.vert.co
+            mirror_vert_co = sel_vert_co.copy()
+            mirror_vert_co[axis_idx] = -mirror_vert_co[axis_idx]
+            
+            # Find closest loop in the mirror face
+            best_loop = None
+            best_loop_dist = threshold
+            for other_loop in best_match.loops:
+                dist = (other_loop.vert.co - mirror_vert_co).length
+                if dist < best_loop_dist:
+                    best_loop_dist = dist
+                    best_loop = other_loop
+            
+            if best_loop is not None:
+                mirror_map[sel_loop.index] = best_loop.index
+    
+    return mirror_map
+
+
 def apply_normal_to_selection(context, normal: Vector, reporter=None):
     """Apply a normal direction to all selected faces"""
     obj = context.active_object
@@ -71,15 +123,35 @@ def apply_normal_to_selection(context, normal: Vector, reporter=None):
             reporter({'WARNING'}, "Please select faces")
         return {'CANCELLED'}
 
+    # Check for mirror setting
+    settings = context.scene.local_normal_editor
+    mirror_axis = settings.mirror_axis
+    mirror_map = {}
+    
+    if mirror_axis != 'NONE':
+        mirror_map = find_mirror_loops(bm, selected_loops, mirror_axis)
+    
     bpy.ops.object.mode_set(mode='OBJECT')
     normals = [Vector(cn.vector) for cn in mesh.corner_normals]
+    
     for loop_idx in selected_loops:
         normals[loop_idx] = normal
+    
+    # Apply mirrored normals
+    if mirror_map:
+        axis_idx = {'X': 0, 'Y': 1, 'Z': 2}[mirror_axis]
+        mirrored_normal = normal.copy()
+        mirrored_normal[axis_idx] = -mirrored_normal[axis_idx]
+        
+        for orig_idx, mirror_idx in mirror_map.items():
+            normals[mirror_idx] = mirrored_normal
+    
     mesh.normals_split_custom_set(normals)
     bpy.ops.object.mode_set(mode='EDIT')
 
+    mirror_info = f" (mirrored {mirror_axis})" if mirror_map else ""
     if reporter:
-        reporter({'INFO'}, f"Normal set to {tuple(round(n, 3) for n in normal)}")
+        reporter({'INFO'}, f"Normal set to {tuple(round(n, 3) for n in normal)}{mirror_info}")
     return {'FINISHED'}
 
 
@@ -107,6 +179,17 @@ class LocalNormalSettings(bpy.types.PropertyGroup):
         description="Snap angles to 15° increments",
         default=True,
     )
+    mirror_axis: EnumProperty(
+        name="Mirror",
+        description="Mirror edit to opposite side",
+        items=[
+            ('NONE', "None", "No mirroring"),
+            ('X', "X", "Mirror across X axis"),
+            ('Y', "Y", "Mirror across Y axis"),
+            ('Z', "Z", "Mirror across Z axis"),
+        ],
+        default='NONE',
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -129,6 +212,7 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
     _sphere_radius = 100
     _original_normals = None  # Store original normals for cancel
     _selected_loops = None
+    _mirror_map = None
 
     @classmethod
     def poll(cls, context):
@@ -155,6 +239,12 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         if not self._selected_loops:
             self.report({'WARNING'}, "Please select faces first")
             return {'CANCELLED'}
+        
+        # Setup mirror map if mirror is enabled
+        if settings.mirror_axis != 'NONE':
+            self._mirror_map = find_mirror_loops(bm, self._selected_loops, settings.mirror_axis)
+        else:
+            self._mirror_map = {}
         
         bpy.ops.object.mode_set(mode='OBJECT')
         self._original_normals = [Vector(cn.vector) for cn in mesh.corner_normals]
@@ -260,11 +350,23 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         obj = context.active_object
         mesh = obj.data
         normal = spherical_to_vector(self._yaw, self._pitch)
+        settings = context.scene.local_normal_editor
 
         bpy.ops.object.mode_set(mode='OBJECT')
         normals = [Vector(cn.vector) for cn in mesh.corner_normals]
+        
         for loop_idx in self._selected_loops:
             normals[loop_idx] = normal
+        
+        # Apply mirrored normals
+        if self._mirror_map:
+            axis_idx = {'X': 0, 'Y': 1, 'Z': 2}[settings.mirror_axis]
+            mirrored_normal = normal.copy()
+            mirrored_normal[axis_idx] = -mirrored_normal[axis_idx]
+            
+            for orig_idx, mirror_idx in self._mirror_map.items():
+                normals[mirror_idx] = mirrored_normal
+        
         mesh.normals_split_custom_set(normals)
         bpy.ops.object.mode_set(mode='EDIT')
 
@@ -473,6 +575,7 @@ class VIEW3D_PT_local_normal_editor(bpy.types.Panel):
         
         col = layout.column(align=True)
         col.prop(settings, "use_snap")
+        col.prop(settings, "mirror_axis")
 
         layout.separator()
 
