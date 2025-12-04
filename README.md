@@ -9,6 +9,7 @@ A Blender addon for editing custom normals in local space with intuitive directi
 
 - **Intuitive Direction Grid**: Set normals using a 3x3 directional grid (front view perspective)
 - **Custom Direction**: Specify any custom normal direction
+- **Spherical Control**: Yaw/Pitch sliders with optional 15° snapping for full 360° coverage
 - **Copy from Active Face**: Copy the normal from the active face to all selected faces
 - **Average Normals**: Average the normals of selected vertices
 - **Clear Custom Normals**: Remove custom normals and restore defaults
@@ -37,6 +38,7 @@ A Blender addon for editing custom normals in local space with intuitive directi
 - **Arrows**: Diagonal and cardinal directions
 
 ### Tools
+- **Spherical Control**: Adjust yaw/pitch sliders (snap in 15° steps) and click *Apply Spherical Normal*
 - **Copy from Active Face**: Copies the active face's normal to all selected faces
 - **Average Normals**: Averages normals of selected vertices
 - **Clear Custom Normals**: Removes all custom normal data
