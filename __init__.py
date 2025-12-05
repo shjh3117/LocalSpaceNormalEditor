@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 7),
+    "version": (0, 0, 8),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -818,9 +818,21 @@ class MESH_OT_bake_normal_map(bpy.types.Operator):
         default="//normal_map.png",
     )
     
-    unreal_coords: BoolProperty(
-        name="Flip Green (DirectX)",
-        description="Flip Y/Green channel for DirectX-based engines (UE, Unity HDRP, etc.)",
+    flip_red: BoolProperty(
+        name="Flip X (Unreal Engine)",
+        description="Flip X/Red channel",
+        default=False,
+    )
+    
+    flip_green: BoolProperty(
+        name="Flip Y",
+        description="Flip Y/Green channel",
+        default=False,
+    )
+    
+    flip_blue: BoolProperty(
+        name="Flip Z (Unreal Engine)",
+        description="Flip Z/Blue channel",
         default=False,
     )
 
@@ -894,7 +906,9 @@ class MESH_OT_bake_normal_map(bpy.types.Operator):
                     pixels, mask, res,
                     [uvs[0], uvs[i], uvs[i + 1]],
                     normal,
-                    self.unreal_coords
+                    flip_x=self.flip_red,
+                    flip_y=self.flip_green,
+                    flip_z=self.flip_blue
                 )
         
         # Apply padding
@@ -914,16 +928,16 @@ class MESH_OT_bake_normal_map(bpy.types.Operator):
         self.report({'INFO'}, f"Normal map saved to {self.filepath}")
         return {'FINISHED'}
     
-    def _rasterize_solid(self, pixels, mask, res, uvs, normal, flip_y=False):
+    def _rasterize_solid(self, pixels, mask, res, uvs, normal, flip_x=False, flip_y=False, flip_z=False):
         """Fill triangle with a single solid color"""
         p0 = (uvs[0].x * res, uvs[0].y * res)
         p1 = (uvs[1].x * res, uvs[1].y * res)
         p2 = (uvs[2].x * res, uvs[2].y * res)
         
-        # Pre-compute color (flip Y for Unreal Engine)
-        r = normal.x * 0.5 + 0.5
+        # Pre-compute color (flip RGB channels independently)
+        r = (-normal.x * 0.5 + 0.5) if flip_x else (normal.x * 0.5 + 0.5)
         g = (-normal.y * 0.5 + 0.5) if flip_y else (normal.y * 0.5 + 0.5)
-        b = normal.z * 0.5 + 0.5
+        b = (-normal.z * 0.5 + 0.5) if flip_z else (normal.z * 0.5 + 0.5)
         
         min_x = max(0, int(min(p0[0], p1[0], p2[0])))
         max_x = min(res - 1, int(max(p0[0], p1[0], p2[0])) + 1)

@@ -69,6 +69,10 @@ This project is licensed under the GPL-2.0-or-later license. See the [LICENSE](L
 
 ## Changelog
 
+### v0.0.8
+- Added individual Flip X/Y/Z options for normal map baking
+- Unreal Engine users: enable Flip X and Flip Z
+
 ### v0.0.7
 - Added "Flip Green (DirectX)" option for UE/Unity HDRP compatibility
 
