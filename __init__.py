@@ -55,8 +55,11 @@ def load_normals_from_object(obj):
         return {}
 
 
-# Memory cache (for performance during editing)
-_custom_normal_cache = {}
+# -----------------------------------------------------------------------------
+# Helpers
+
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -751,49 +754,7 @@ class MESH_OT_bake_normal_map(bpy.types.Operator):
                     pixels[y, x, 3] = 1.0
                     mask[y, x] = True
     
-    def _rasterize_triangle(self, pixels, mask, res, uvs, normals):
-        p0 = (uvs[0].x * res, uvs[0].y * res)
-        p1 = (uvs[1].x * res, uvs[1].y * res)
-        p2 = (uvs[2].x * res, uvs[2].y * res)
-        
-        min_x = max(0, int(min(p0[0], p1[0], p2[0])))
-        max_x = min(res - 1, int(max(p0[0], p1[0], p2[0])) + 1)
-        min_y = max(0, int(min(p0[1], p1[1], p2[1])))
-        max_y = min(res - 1, int(max(p0[1], p1[1], p2[1])) + 1)
-        
-        for y in range(min_y, max_y + 1):
-            for x in range(min_x, max_x + 1):
-                # Skip already written pixels to avoid edge conflicts
-                if mask[y, x]:
-                    continue
-                    
-                bc = self._barycentric(p0, p1, p2, (x + 0.5, y + 0.5))
-                if bc is None:
-                    continue
-                    
-                w0, w1, w2 = bc
-                # Use small epsilon to be strictly inside triangle
-                if w0 >= -1e-6 and w1 >= -1e-6 and w2 >= -1e-6:
-                    # Interpolate normal
-                    normal = normals[0] * w0 + normals[1] * w1 + normals[2] * w2
-                    
-                    # Safe normalize
-                    length = normal.length
-                    if length > 1e-8:
-                        normal = normal / length
-                    else:
-                        normal = Vector((0, 0, 1))
-                    
-                    # Convert to color and clamp
-                    r = max(0.0, min(1.0, normal.x * 0.5 + 0.5))
-                    g = max(0.0, min(1.0, normal.y * 0.5 + 0.5))
-                    b = max(0.0, min(1.0, normal.z * 0.5 + 0.5))
-                    
-                    pixels[y, x, 0] = r
-                    pixels[y, x, 1] = g
-                    pixels[y, x, 2] = b
-                    pixels[y, x, 3] = 1.0
-                    mask[y, x] = True
+
     
     def _barycentric(self, p0, p1, p2, p):
         """Calculate barycentric coordinates for point p in triangle p0,p1,p2.
