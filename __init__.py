@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 2),
+    "version": (0, 0, 3),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -16,14 +16,47 @@ import bpy
 import bmesh
 import blf
 import gpu
+import numpy as np
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 from bpy.props import (
     BoolProperty,
     EnumProperty,
     FloatProperty,
+    IntProperty,
     PointerProperty,
+    StringProperty,
 )
+
+
+# -----------------------------------------------------------------------------
+# Custom Normal Storage (saved in object custom properties)
+# This stores the normals set by Spherical Picker
+
+import json
+
+CUSTOM_NORMAL_PROP = "local_normal_editor_data"  # Property name for storage
+
+
+def save_normals_to_object(obj, normals_dict):
+    """Save normals dict to object's custom property (persists in .blend)"""
+    # Convert to JSON-serializable format
+    data = {str(k): list(v) for k, v in normals_dict.items()}
+    obj[CUSTOM_NORMAL_PROP] = json.dumps(data)
+
+
+def load_normals_from_object(obj):
+    """Load normals dict from object's custom property"""
+    json_str = obj.get(CUSTOM_NORMAL_PROP, "{}")
+    try:
+        data = json.loads(json_str)
+        return {int(k): tuple(v) for k, v in data.items()}
+    except:
+        return {}
+
+
+# Memory cache (for performance during editing)
+_custom_normal_cache = {}
 
 
 # -----------------------------------------------------------------------------
@@ -177,6 +210,11 @@ class LocalNormalSettings(bpy.types.PropertyGroup):
     use_snap: BoolProperty(
         name="Snap 15°",
         description="Snap angles to 15° increments",
+        default=True,
+    )
+    auto_mark_sharp: BoolProperty(
+        name="Auto Mark Sharp",
+        description="Automatically mark selected edges as sharp when applying normals",
         default=True,
     )
     mirror_axis: EnumProperty(
@@ -352,8 +390,21 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         normal = spherical_to_vector(self._yaw, self._pitch)
         settings = context.scene.local_normal_editor
 
+        # Auto mark sharp on selected edges if enabled
+        if settings.auto_mark_sharp:
+            bpy.ops.mesh.mark_sharp()
+
         bpy.ops.object.mode_set(mode='OBJECT')
         normals = [Vector(cn.vector) for cn in mesh.corner_normals]
+        
+        # Load existing stored normals and update
+        stored_normals = load_normals_from_object(obj)
+        
+        # Find which polygons these loops belong to and store
+        for poly in mesh.polygons:
+            poly_loops = set(poly.loop_indices)
+            if poly_loops & self._selected_loops:  # If any selected loop is in this poly
+                stored_normals[poly.index] = (normal.x, normal.y, normal.z)
         
         for loop_idx in self._selected_loops:
             normals[loop_idx] = normal
@@ -366,6 +417,16 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
             
             for orig_idx, mirror_idx in self._mirror_map.items():
                 normals[mirror_idx] = mirrored_normal
+            
+            # Also store mirrored normals
+            for poly in mesh.polygons:
+                poly_loops = set(poly.loop_indices)
+                mirror_loops = set(self._mirror_map.values())
+                if poly_loops & mirror_loops:
+                    stored_normals[poly.index] = (mirrored_normal.x, mirrored_normal.y, mirrored_normal.z)
+        
+        # Save to object custom property (persists in .blend file)
+        save_normals_to_object(obj, stored_normals)
         
         mesh.normals_split_custom_set(normals)
         bpy.ops.object.mode_set(mode='EDIT')
@@ -552,6 +613,242 @@ class MESH_OT_clear_custom_normals(bpy.types.Operator):
 
 
 # -----------------------------------------------------------------------------
+# Bake Normal Map
+
+
+class MESH_OT_bake_normal_map(bpy.types.Operator):
+    """Bake custom normals to a normal map texture (Object/Local Space)"""
+    bl_idname = "mesh.bake_custom_normal_map"
+    bl_label = "Bake Normal Map"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    resolution: EnumProperty(
+        name="Resolution",
+        items=[
+            ('512', "512x512", ""),
+            ('1024', "1024x1024", ""),
+            ('2048', "2048x2048", ""),
+            ('4096', "4096x4096", ""),
+        ],
+        default='2048',
+    )
+    
+    padding: IntProperty(
+        name="Padding",
+        description="Edge padding in pixels to prevent seam artifacts",
+        default=16,
+        min=0,
+        max=64,
+    )
+    
+    filepath: StringProperty(
+        name="File Path",
+        subtype='FILE_PATH',
+        default="//normal_map.png",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            return False
+        return len(obj.data.uv_layers) > 0
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        
+        original_mode = obj.mode
+        if original_mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        
+        res = int(self.resolution)
+        
+        # Create image array
+        pixels = np.zeros((res, res, 4), dtype=np.float32)
+        pixels[:, :, 0] = 0.5  # R - neutral
+        pixels[:, :, 1] = 0.5  # G - neutral
+        pixels[:, :, 2] = 1.0  # B - neutral (+Z)
+        pixels[:, :, 3] = 1.0  # A
+        
+        mask = np.zeros((res, res), dtype=np.bool_)
+        
+        uv_layer = mesh.uv_layers.active
+        if uv_layer is None:
+            self.report({'ERROR'}, "No active UV layer")
+            return {'CANCELLED'}
+        
+        # Load stored custom normals from object (saved in .blend file)
+        stored_normals = load_normals_from_object(obj)
+        
+        if not stored_normals:
+            self.report({'WARNING'}, "No custom normals set. Use Spherical Picker first!")
+        
+        # Rasterize each polygon using stored custom normals
+        for poly in mesh.polygons:
+            loop_indices = list(poly.loop_indices)
+            uvs = [Vector((uv_layer.data[li].uv[0], uv_layer.data[li].uv[1])) for li in loop_indices]
+            
+            # Get stored normal for this polygon, or use default (0, 0, 1) = blue
+            if poly.index in stored_normals:
+                nx, ny, nz = stored_normals[poly.index]
+                normal = Vector((nx, ny, nz))
+            else:
+                normal = Vector((0, 0, 1))  # Default: +Z (blue in normal map)
+            
+            # Fan triangulation
+            for i in range(1, len(loop_indices) - 1):
+                self._rasterize_solid(
+                    pixels, mask, res,
+                    [uvs[0], uvs[i], uvs[i + 1]],
+                    normal
+                )
+        
+        # Apply padding
+        if self.padding > 0:
+            self._apply_padding(pixels, mask, self.padding)
+        
+        # Save image
+        img = bpy.data.images.new("NormalMapBake", width=res, height=res, alpha=False)
+        img.pixels = pixels.flatten().tolist()
+        img.filepath_raw = bpy.path.abspath(self.filepath)
+        img.file_format = 'PNG'
+        img.save()
+        
+        if original_mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='EDIT')
+        
+        self.report({'INFO'}, f"Normal map saved to {self.filepath}")
+        return {'FINISHED'}
+    
+    def _rasterize_solid(self, pixels, mask, res, uvs, normal):
+        """Fill triangle with a single solid color"""
+        p0 = (uvs[0].x * res, uvs[0].y * res)
+        p1 = (uvs[1].x * res, uvs[1].y * res)
+        p2 = (uvs[2].x * res, uvs[2].y * res)
+        
+        # Pre-compute color
+        r = normal.x * 0.5 + 0.5
+        g = normal.y * 0.5 + 0.5
+        b = normal.z * 0.5 + 0.5
+        
+        min_x = max(0, int(min(p0[0], p1[0], p2[0])))
+        max_x = min(res - 1, int(max(p0[0], p1[0], p2[0])) + 1)
+        min_y = max(0, int(min(p0[1], p1[1], p2[1])))
+        max_y = min(res - 1, int(max(p0[1], p1[1], p2[1])) + 1)
+        
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                bc = self._barycentric(p0, p1, p2, (x + 0.5, y + 0.5))
+                if bc and bc[0] >= 0 and bc[1] >= 0 and bc[2] >= 0:
+                    pixels[y, x, 0] = r
+                    pixels[y, x, 1] = g
+                    pixels[y, x, 2] = b
+                    pixels[y, x, 3] = 1.0
+                    mask[y, x] = True
+    
+    def _rasterize_triangle(self, pixels, mask, res, uvs, normals):
+        p0 = (uvs[0].x * res, uvs[0].y * res)
+        p1 = (uvs[1].x * res, uvs[1].y * res)
+        p2 = (uvs[2].x * res, uvs[2].y * res)
+        
+        min_x = max(0, int(min(p0[0], p1[0], p2[0])))
+        max_x = min(res - 1, int(max(p0[0], p1[0], p2[0])) + 1)
+        min_y = max(0, int(min(p0[1], p1[1], p2[1])))
+        max_y = min(res - 1, int(max(p0[1], p1[1], p2[1])) + 1)
+        
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                # Skip already written pixels to avoid edge conflicts
+                if mask[y, x]:
+                    continue
+                    
+                bc = self._barycentric(p0, p1, p2, (x + 0.5, y + 0.5))
+                if bc is None:
+                    continue
+                    
+                w0, w1, w2 = bc
+                # Use small epsilon to be strictly inside triangle
+                if w0 >= -1e-6 and w1 >= -1e-6 and w2 >= -1e-6:
+                    # Interpolate normal
+                    normal = normals[0] * w0 + normals[1] * w1 + normals[2] * w2
+                    
+                    # Safe normalize
+                    length = normal.length
+                    if length > 1e-8:
+                        normal = normal / length
+                    else:
+                        normal = Vector((0, 0, 1))
+                    
+                    # Convert to color and clamp
+                    r = max(0.0, min(1.0, normal.x * 0.5 + 0.5))
+                    g = max(0.0, min(1.0, normal.y * 0.5 + 0.5))
+                    b = max(0.0, min(1.0, normal.z * 0.5 + 0.5))
+                    
+                    pixels[y, x, 0] = r
+                    pixels[y, x, 1] = g
+                    pixels[y, x, 2] = b
+                    pixels[y, x, 3] = 1.0
+                    mask[y, x] = True
+    
+    def _barycentric(self, p0, p1, p2, p):
+        """Calculate barycentric coordinates for point p in triangle p0,p1,p2.
+        Returns weights (w0, w1, w2) such that P = w0*p0 + w1*p1 + w2*p2"""
+        v0 = (p1[0] - p0[0], p1[1] - p0[1])  # p1 - p0
+        v1 = (p2[0] - p0[0], p2[1] - p0[1])  # p2 - p0
+        v2 = (p[0] - p0[0], p[1] - p0[1])    # p - p0
+        
+        d00 = v0[0] * v0[0] + v0[1] * v0[1]
+        d01 = v0[0] * v1[0] + v0[1] * v1[1]
+        d02 = v0[0] * v2[0] + v0[1] * v2[1]
+        d11 = v1[0] * v1[0] + v1[1] * v1[1]
+        d12 = v1[0] * v2[0] + v1[1] * v2[1]
+        
+        denom = d00 * d11 - d01 * d01
+        if abs(denom) < 1e-10:
+            return None
+        
+        inv = 1.0 / denom
+        u = (d11 * d02 - d01 * d12) * inv  # weight for p1
+        v = (d00 * d12 - d01 * d02) * inv  # weight for p2
+        w = 1.0 - u - v                     # weight for p0
+        
+        return (w, u, v)  # (p0_weight, p1_weight, p2_weight)
+    
+    def _apply_padding(self, pixels, mask, padding_size):
+        padded = pixels.copy()
+        current_mask = mask.copy()
+        res = pixels.shape[0]
+        
+        for _ in range(padding_size):
+            new_mask = current_mask.copy()
+            for y in range(res):
+                for x in range(res):
+                    if current_mask[y, x]:
+                        continue
+                    neighbors = []
+                    for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < res and 0 <= nx < res and current_mask[ny, nx]:
+                            neighbors.append((ny, nx))
+                    if neighbors:
+                        r, g, b = 0.0, 0.0, 0.0
+                        for ny, nx in neighbors:
+                            r += padded[ny, nx, 0]
+                            g += padded[ny, nx, 1]
+                            b += padded[ny, nx, 2]
+                        n = len(neighbors)
+                        padded[y, x] = [r/n, g/n, b/n, 1.0]
+                        new_mask[y, x] = True
+            current_mask = new_mask
+        pixels[:] = padded
+
+
+# -----------------------------------------------------------------------------
 # Panel
 
 
@@ -575,12 +872,18 @@ class VIEW3D_PT_local_normal_editor(bpy.types.Panel):
         
         col = layout.column(align=True)
         col.prop(settings, "use_snap")
+        col.prop(settings, "auto_mark_sharp")
         col.prop(settings, "mirror_axis")
 
         layout.separator()
 
         # Clear
         layout.operator("mesh.clear_custom_normals", text="Clear Custom Normals", icon='X')
+        
+        layout.separator()
+        
+        # Bake
+        layout.operator("mesh.bake_custom_normal_map", text="Bake Normal Map", icon='IMAGE_DATA')
 
 
 class VIEW3D_PT_local_normal_display(bpy.types.Panel):
@@ -611,6 +914,7 @@ classes = (
     LocalNormalSettings,
     MESH_OT_spherical_popup,
     MESH_OT_clear_custom_normals,
+    MESH_OT_bake_normal_map,
     VIEW3D_PT_local_normal_editor,
     VIEW3D_PT_local_normal_display,
 )
