@@ -69,6 +69,9 @@ This project is licensed under the GPL-2.0-or-later license. See the [LICENSE](L
 
 ## Changelog
 
+### v0.0.6
+- Normal Map Baking now only exports selected faces (in Edit Mode)
+
 ### v0.0.5
 - Toon Shading Preview with adjustable light direction
 

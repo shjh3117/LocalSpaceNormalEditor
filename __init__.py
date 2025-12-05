@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 5),
+    "version": (0, 0, 6),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -834,8 +834,17 @@ class MESH_OT_bake_normal_map(bpy.types.Operator):
         mesh = obj.data
         
         original_mode = obj.mode
+        selected_poly_indices = set()
+        
+        # Get selected polygons in Edit Mode
         if original_mode == 'EDIT':
+            bm = bmesh.from_edit_mesh(mesh)
+            selected_poly_indices = {f.index for f in bm.faces if f.select}
             bpy.ops.object.mode_set(mode='OBJECT')
+        
+        # If no selection, use all polygons
+        if not selected_poly_indices:
+            selected_poly_indices = {p.index for p in mesh.polygons}
         
         res = int(self.resolution)
         
@@ -859,8 +868,10 @@ class MESH_OT_bake_normal_map(bpy.types.Operator):
         if not stored_normals:
             self.report({'WARNING'}, "No custom normals set. Use Spherical Picker first!")
         
-        # Rasterize each polygon using stored custom normals
+        # Rasterize only selected polygons using stored custom normals
         for poly in mesh.polygons:
+            if poly.index not in selected_poly_indices:
+                continue
             loop_indices = list(poly.loop_indices)
             uvs = [Vector((uv_layer.data[li].uv[0], uv_layer.data[li].uv[1])) for li in loop_indices]
             
