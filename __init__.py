@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 4),
+    "version": (0, 0, 5),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -23,6 +23,7 @@ from bpy.props import (
     BoolProperty,
     EnumProperty,
     FloatProperty,
+    FloatVectorProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
@@ -53,6 +54,129 @@ def load_normals_from_object(obj):
         return {int(k): tuple(v) for k, v in data.items()}
     except:
         return {}
+
+
+# -----------------------------------------------------------------------------
+# Toon Preview State
+_toon_preview_state = {
+    "handler": None,
+    "batch": None,
+    "shader": None,
+    "object_name": None
+}
+
+def update_toon_preview_batch(context):
+    """Update the GPU batch for toon preview"""
+    obj = context.active_object
+    if not obj or obj.type != 'MESH':
+        return
+    
+    mesh = obj.data
+    mesh.calc_loop_triangles()
+    
+    # Load custom normals
+    stored_normals = load_normals_from_object(obj)
+    
+    vertices = []
+    colors = []
+    
+    # Light direction from settings
+    settings = context.scene.local_normal_editor
+    light_dir = settings.toon_light_dir.normalized()
+    
+    # Iterate over loop triangles to get geometry
+    # Note: This might be slow for very heavy meshes, but okay for low/mid poly
+    for tri in mesh.loop_triangles:
+        tri_verts = []
+        tri_colors = []
+        
+        # Determine normal for this triangle
+        # If poly index has custom normal, use it. Otherwise use loop normal or poly normal.
+        # Since we store by poly index, we check that.
+        if tri.polygon_index in stored_normals:
+            nx, ny, nz = stored_normals[tri.polygon_index]
+            normal = Vector((nx, ny, nz))
+        else:
+            normal = tri.normal # Fallback to geometry normal
+            
+        # Calculate Toon Color: step(0.0, dot(N, L))
+        # dot > 0 -> Lit (White), dot <= 0 -> Shadow (Black/Grey)
+        dot = normal.dot(light_dir)
+        intensity = 1.0 if dot > 0.0 else 0.1
+        color = (intensity, intensity, intensity, 1.0)
+        
+        for v_idx in tri.vertices:
+            vertices.append(mesh.vertices[v_idx].co)
+            colors.append(color)
+            
+    if not vertices:
+        return
+
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR') if not colors else gpu.shader.from_builtin('FLAT_COLOR')
+    if colors:
+        batch = batch_for_shader(shader, 'TRIS', {"pos": vertices, "color": colors})
+    else:
+        batch = batch_for_shader(shader, 'TRIS', {"pos": vertices})
+        
+    _toon_preview_state["batch"] = batch
+    _toon_preview_state["shader"] = shader
+    _toon_preview_state["object_name"] = obj.name
+
+def update_preview_callback(self, context):
+    """Callback for property updates to refresh preview"""
+    if _toon_preview_state["handler"]:
+        update_toon_preview_batch(context)
+        if context.area:
+            context.area.tag_redraw()
+
+def draw_toon_preview():
+    """Draw handler for toon preview"""
+    if not _toon_preview_state["batch"]:
+        return
+        
+    obj = bpy.context.active_object
+    if not obj or obj.name != _toon_preview_state["object_name"]:
+        return
+        
+    # Only draw in Edit Mode
+    if obj.mode != 'EDIT':
+        return
+
+    shader = _toon_preview_state["shader"]
+    batch = _toon_preview_state["batch"]
+    
+    gpu.state.depth_test_set('LESS_EQUAL')
+    gpu.state.face_culling_set('BACK')
+    
+    matrix = obj.matrix_world
+    shader.bind()
+    
+    gpu.matrix.push()
+    gpu.matrix.multiply_matrix(matrix)
+    batch.draw(shader)
+    
+    # Draw Light Direction Arrow
+    settings = bpy.context.scene.local_normal_editor
+    light_dir = settings.toon_light_dir.normalized()
+    scale = 2.0  # Length of the arrow
+    
+    p0 = (0, 0, 0)
+    p1 = (light_dir.x * scale, light_dir.y * scale, light_dir.z * scale)
+    
+    # Simple line for arrow shaft
+    shader_line = gpu.shader.from_builtin('UNIFORM_COLOR')
+    batch_line = batch_for_shader(shader_line, 'LINES', {"pos": [p0, p1]})
+    
+    shader_line.bind()
+    shader_line.uniform_float("color", (1.0, 1.0, 0.0, 1.0)) # Yellow
+    gpu.state.line_width_set(3.0)
+    batch_line.draw(shader_line)
+    gpu.state.line_width_set(1.0)
+    
+    gpu.matrix.pop()
+    
+    gpu.state.face_culling_set('NONE')
+    gpu.state.depth_test_set('NONE')
 
 
 # -----------------------------------------------------------------------------
@@ -215,10 +339,14 @@ class LocalNormalSettings(bpy.types.PropertyGroup):
         description="Snap angles to 15° increments",
         default=True,
     )
-    auto_mark_sharp: BoolProperty(
-        name="Auto Mark Sharp",
-        description="Automatically mark selected edges as sharp when applying normals",
-        default=True,
+    toon_light_dir: FloatVectorProperty(
+        name="Light Direction",
+        description="Direction of the light for toon preview",
+        subtype='XYZ',
+        default=(0.5, 0.5, 1.0),
+        min=-1.0,
+        max=1.0,
+        update=update_preview_callback,
     )
     mirror_axis: EnumProperty(
         name="Mirror",
@@ -393,10 +521,6 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         normal = spherical_to_vector(self._yaw, self._pitch)
         settings = context.scene.local_normal_editor
 
-        # Auto mark sharp on selected edges if enabled
-        if settings.auto_mark_sharp:
-            bpy.ops.mesh.mark_sharp()
-
         bpy.ops.object.mode_set(mode='OBJECT')
         normals = [Vector(cn.vector) for cn in mesh.corner_normals]
         
@@ -432,6 +556,12 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         save_normals_to_object(obj, stored_normals)
         
         mesh.normals_split_custom_set(normals)
+        
+        # Update preview if active
+        if _toon_preview_state["handler"]:
+            update_toon_preview_batch(context)
+            context.area.tag_redraw()
+            
         bpy.ops.object.mode_set(mode='EDIT')
 
     def restore_original_normals(self, context):
@@ -612,6 +742,44 @@ class MESH_OT_clear_custom_normals(bpy.types.Operator):
             bpy.ops.object.mode_set(mode='EDIT')
 
         self.report({'INFO'}, "Custom normals cleared")
+        return {'FINISHED'}
+
+
+# -----------------------------------------------------------------------------
+# Toon Preview Operator
+
+
+class MESH_OT_toggle_toon_preview(bpy.types.Operator):
+    """Toggle Toon Shading Preview for Custom Normals"""
+    bl_idname = "mesh.toggle_toon_preview"
+    bl_label = "Toggle Toon Preview"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+
+    def execute(self, context):
+        global _toon_preview_state
+        
+        if _toon_preview_state["handler"]:
+            # Turn OFF
+            bpy.types.SpaceView3D.draw_handler_remove(_toon_preview_state["handler"], 'WINDOW')
+            _toon_preview_state["handler"] = None
+            _toon_preview_state["batch"] = None
+            self.report({'INFO'}, "Toon Preview: OFF")
+        else:
+            # Turn ON
+            update_toon_preview_batch(context)
+            if _toon_preview_state["batch"]:
+                _toon_preview_state["handler"] = bpy.types.SpaceView3D.draw_handler_add(
+                    draw_toon_preview, (), 'WINDOW', 'POST_VIEW'
+                )
+                self.report({'INFO'}, "Toon Preview: ON")
+            else:
+                self.report({'WARNING'}, "Could not create preview batch")
+                
+        context.area.tag_redraw()
         return {'FINISHED'}
 
 
@@ -833,9 +1001,18 @@ class VIEW3D_PT_local_normal_editor(bpy.types.Panel):
         
         col = layout.column(align=True)
         col.prop(settings, "use_snap")
-        col.prop(settings, "auto_mark_sharp")
         col.prop(settings, "mirror_axis")
 
+        layout.separator()
+
+        # Preview
+        icon = 'HIDE_OFF' if _toon_preview_state["handler"] else 'HIDE_ON'
+        text = "Disable Preview" if _toon_preview_state["handler"] else "Enable Toon Preview"
+        layout.operator("mesh.toggle_toon_preview", text=text, icon=icon)
+        
+        if _toon_preview_state["handler"]:
+            layout.prop(settings, "toon_light_dir")
+        
         layout.separator()
 
         # Clear
@@ -875,6 +1052,7 @@ classes = (
     LocalNormalSettings,
     MESH_OT_spherical_popup,
     MESH_OT_clear_custom_normals,
+    MESH_OT_toggle_toon_preview,
     MESH_OT_bake_normal_map,
     VIEW3D_PT_local_normal_editor,
     VIEW3D_PT_local_normal_display,

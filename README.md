@@ -16,8 +16,16 @@ A Blender addon for editing custom normals in local space with an interactive sp
   - Front/Back hemisphere toggle (press `F` to flip)
   - 15° angle snapping (optional)
   - Cancel to restore original normals
+- **Toon Shading Preview**: Visualize custom normals with toon shading effect
+  - Toggle on/off with a button
+  - Adjustable light direction (XYZ)
+  - Yellow arrow shows current light direction
+  - Only visible in Edit Mode
+- **Normal Map Baking**: Export custom normals to object-space normal map
+  - Resolutions: 512, 1024, 2048, 4096
+  - Edge padding to prevent seam artifacts
+- **Persistent Storage**: Custom normals are saved with the .blend file
 - **Mirror Editing**: Edit normals symmetrically across X, Y, or Z axis
-  - Automatically finds and updates opposite side faces
 - **Clear Custom Normals**: Remove custom normals and restore defaults
 - **Normal Display Settings**: Quick access to split normal visualization
 
@@ -58,6 +66,28 @@ A Blender addon for editing custom normals in local space with an interactive sp
 ## License
 
 This project is licensed under the GPL-2.0-or-later license. See the [LICENSE](LICENSE) file for details.
+
+## Changelog
+
+### v0.0.5
+- Toon Shading Preview with adjustable light direction
+
+### v0.0.4
+- Removed auto mark sharp feature (buggy)
+- Added Normal Map Baking with custom dictionary approach
+- Added Persistent Storage (normals saved in .blend file)
+
+### v0.0.3
+- Auto mark edges as sharp when applying normals (to prevent interpolation)
+
+### v0.0.2
+- Added Mirror editing feature (X/Y/Z axis)
+
+### v0.0.1
+- Initial release
+- Spherical picker with real-time preview
+- 15° angle snapping
+- Flip view (front/back hemisphere)
 
 ## Author
 
