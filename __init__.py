@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 9),
+    "version": (0, 0, 10),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -759,6 +759,38 @@ class MESH_OT_clear_custom_normals(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class MESH_OT_mark_all_sharp(bpy.types.Operator):
+    """Mark all edges as sharp to prevent normal interpolation"""
+    bl_idname = "mesh.mark_all_edges_sharp"
+    bl_label = "Mark All Edges Sharp"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'MESH'
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        mode = obj.mode
+        
+        if mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        
+        # Mark all edges as sharp
+        count = 0
+        for edge in mesh.edges:
+            if not edge.use_edge_sharp:
+                edge.use_edge_sharp = True
+                count += 1
+        
+        if mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='EDIT')
+        
+        self.report({'INFO'}, f"Marked {count} edges as sharp (Total: {len(mesh.edges)})")
+        return {'FINISHED'}
+
 
 # -----------------------------------------------------------------------------
 # Smooth Custom Normals
@@ -1187,8 +1219,10 @@ class VIEW3D_PT_local_normal_editor(bpy.types.Panel):
         
         layout.separator()
 
-        # Clear
-        layout.operator("mesh.clear_custom_normals", text="Clear Custom Normals", icon='X')
+        # Clear / Setup
+        col = layout.column(align=True)
+        col.operator("mesh.mark_all_edges_sharp", text="Mark All Sharp", icon='EDGESEL')
+        col.operator("mesh.clear_custom_normals", text="Clear Custom Normals", icon='X')
         
         layout.separator()
         
@@ -1223,6 +1257,10 @@ class VIEW3D_PT_local_normal_display(bpy.types.Panel):
         col = layout.column(align=True)
         col.prop(overlay, "show_split_normals", text="Show Split Normals")
         col.prop(overlay, "normals_length", text="Length")
+        
+        layout.separator()
+        col = layout.column(align=True)
+        col.prop(overlay, "show_edge_sharp", text="Show Sharp Edges (Blue)")
 
 
 # -----------------------------------------------------------------------------
@@ -1233,6 +1271,7 @@ classes = (
     LocalNormalSettings,
     MESH_OT_spherical_popup,
     MESH_OT_clear_custom_normals,
+    MESH_OT_mark_all_sharp,
     MESH_OT_smooth_custom_normals,
     MESH_OT_toggle_toon_preview,
     MESH_OT_bake_normal_map,
