@@ -1,9 +1,9 @@
-# SPDX-License-Identifier: GPL-2.0-or-later
+﻿# SPDX-License-Identifier: GPL-2.0-or-later
 
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 11),
+    "version": (0, 1, 0),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -359,20 +359,44 @@ class LocalNormalSettings(bpy.types.PropertyGroup):
         ],
         default='NONE',
     )
-    smooth_factor: FloatProperty(
-        name="Smooth Factor",
-        description="Strength of the smoothing effect",
-        default=0.5,
-        min=0.0,
-        max=1.0,
+    
+    # Bake Settings (Shared)
+    bake_resolution: EnumProperty(
+        name="Resolution",
+        items=[
+            ('512', "512x512", ""),
+            ('1024', "1024x1024", ""),
+            ('2048', "2048x2048", ""),
+            ('4096', "4096x4096", ""),
+        ],
+        default='2048',
     )
-    smooth_iterations: IntProperty(
-        name="Iterations",
-        description="Number of smoothing passes",
-        default=3,
-        min=1,
-        max=20,
+    bake_padding: IntProperty(
+        name="Padding",
+        default=16,
+        min=0, max=64,
     )
+    bake_use_smoothing: BoolProperty(
+        name="Apply Smoothing",
+        description="Apply blur to bake",
+        default=False,
+    )
+    bake_smooth_radius: IntProperty(
+        name="Blur Radius",
+        description="Radius of box blur",
+        default=2, min=1, max=20,
+    )
+    bake_smooth_iterations: IntProperty(
+        name="Blur Iterations",
+        description="Repeat blur",
+        default=1, min=1, max=10,
+    )
+    
+    # Flip settings
+    bake_flip_red: BoolProperty(name="Flip X", default=False)
+    bake_flip_green: BoolProperty(name="Flip Y", default=False)
+    bake_flip_blue: BoolProperty(name="Flip Z", default=False)
+
 
 
 # -----------------------------------------------------------------------------
@@ -776,129 +800,7 @@ class MESH_OT_mark_all_sharp(bpy.types.Operator):
         return {'FINISHED'}
 
 
-# -----------------------------------------------------------------------------
-# Smooth Custom Normals
 
-class MESH_OT_smooth_custom_normals(bpy.types.Operator):
-    """Smooth custom normals using Gaussian-like filter"""
-    bl_idname = "mesh.smooth_custom_normals"
-    bl_label = "Smooth Custom Normals"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object and context.active_object.type == 'MESH'
-
-    def execute(self, context):
-        obj = context.active_object
-        mesh = obj.data
-        settings = context.scene.local_normal_editor
-        
-        # Load stored normals
-        stored_normals = load_normals_from_object(obj) # {poly_index: (x, y, z)}
-        if not stored_normals:
-            self.report({'WARNING'}, "No custom normals found to smooth")
-            return {'CANCELLED'}
-
-        # Build connectivity map: face_idx -> list of connected face_indices
-        # Two faces are connected if they share at least one vertex
-        vert_to_faces = {} # vert_idx -> [face_idx, ...]
-        for poly in mesh.polygons:
-            for v_idx in poly.vertices:
-                if v_idx not in vert_to_faces:
-                    vert_to_faces[v_idx] = []
-                vert_to_faces[v_idx].append(poly.index)
-        
-        face_neighbors = {} # face_idx -> set(neighbor_face_indices)
-        for poly in mesh.polygons:
-            neighbors = set()
-            for v_idx in poly.vertices:
-                for neighbor_idx in vert_to_faces[v_idx]:
-                    if neighbor_idx != poly.index:
-                        neighbors.add(neighbor_idx)
-            face_neighbors[poly.index] = neighbors
-            
-        # Smoothing iterations
-        current_normals = stored_normals.copy()
-        factor = settings.smooth_factor
-        
-        self.report({'INFO'}, f"Smoothing normals... (Factor: {factor}, Iterations: {settings.smooth_iterations})")
-        
-        for i in range(settings.smooth_iterations):
-            next_normals = {}
-            for poly_idx, current_normal_tuple in current_normals.items():
-                current_normal = Vector(current_normal_tuple)
-                
-                # Gather neighbor normals
-                neighbor_sum = Vector((0, 0, 0))
-                count = 0
-                
-                # Check if neighbors have custom normals
-                neighbors = face_neighbors.get(poly_idx, set())
-                for n_idx in neighbors:
-                    if n_idx in current_normals:
-                        neighbor_sum += Vector(current_normals[n_idx])
-                        count += 1
-                
-                if count > 0:
-                    avg_normal = neighbor_sum / count
-                    avg_normal.normalize()
-                    
-                    # Lerp: original -> average
-                    smoothed = current_normal.lerp(avg_normal, factor)
-                    smoothed.normalize()
-                    next_normals[poly_idx] = (smoothed.x, smoothed.y, smoothed.z)
-                else:
-                    next_normals[poly_idx] = current_normal_tuple
-            
-            current_normals = next_normals
-            
-        # Save back
-        save_normals_to_object(obj, current_normals)
-        
-        # Apply to mesh
-        # We need to apply these new normals to the loop normals of the mesh
-        # If a face has a custom normal, all its loops get that normal (flat shading style for custom normals per face)
-        
-        # 1. Get current loop normals (to keep non-custom ones intact if any mixed state exists, though we usually overwrite)
-        mesh.calc_normals_split()
-        loop_normals = [Vector(l.normal) for l in mesh.loops] # Fallback to auto
-        
-        # 2. But we want to apply OUR stored normals
-        # Create a list of normals for all loops
-        # If a poly has a stored normal, use it. Else use... what? 
-        # Usually we apply to ALL loops if we are using this system.
-        
-        # However, MESH_OT_apply_current_normal updates specific loops.
-        # Let's reconstruct the fill list.
-        
-        new_loop_normals = []
-        for poly in mesh.polygons:
-            if poly.index in current_normals:
-                nx, ny, nz = current_normals[poly.index]
-                n = Vector((nx, ny, nz))
-            else:
-                n = Vector((0, 0, 1)) # Fallback, shouldn't happen if we loaded them
-                # Or better, use the existing loop normal?
-                # For safety, let's look at the first loop of the poly
-                # But calculating split normals might be slow.
-                # Let's just assume we rely on stored normals for everything relevant.
-                
-            for _ in poly.loop_indices:
-                new_loop_normals.append(n)
-
-        # Apply
-        try:
-            mesh.normals_split_custom_set(new_loop_normals)
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to set normals: {e}")
-
-        # Update preview
-        if _toon_preview_state["handler"]:
-            update_toon_preview_batch(context)
-            context.area.tag_redraw()
-
-        return {'FINISHED'}
 
 
 # -----------------------------------------------------------------------------
@@ -992,6 +894,30 @@ class MESH_OT_bake_normal_map(bpy.types.Operator):
         default=False,
     )
 
+    use_smoothing: BoolProperty(
+        name="Apply Post-Smoothing",
+        description="Apply Gaussian blur to the baked normal map",
+        default=False,
+    )
+    
+    smooth_radius: IntProperty(
+        name="Blur Radius",
+        description="Radius of Gaussian blur in pixels",
+        default=2,
+        min=1,
+        max=10,
+    )
+    
+
+    
+    smooth_iterations: IntProperty(
+        name="Blur Iterations",
+        description="Repeat blur for smoother approximation",
+        default=1,
+        min=1,
+        max=10,
+    )
+
     @classmethod
     def poll(cls, context):
         obj = context.active_object
@@ -1000,169 +926,322 @@ class MESH_OT_bake_normal_map(bpy.types.Operator):
         return len(obj.data.uv_layers) > 0
 
     def invoke(self, context, event):
+        # Sync from Scene Settings
+        settings = context.scene.local_normal_editor
+        self.resolution = settings.bake_resolution
+        self.padding = settings.bake_padding
+        self.flip_red = settings.bake_flip_red
+        self.flip_green = settings.bake_flip_green
+        self.flip_blue = settings.bake_flip_blue
+        self.use_smoothing = settings.bake_use_smoothing
+        self.smooth_radius = settings.bake_smooth_radius
+        self.smooth_iterations = settings.bake_smooth_iterations
+        
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
         obj = context.active_object
-        mesh = obj.data
         
-        original_mode = obj.mode
-        selected_poly_indices = set()
+        # Call shared bake function
+        pixels, width, height = bake_normal_map_process(
+            context, 
+            obj, 
+            int(self.resolution), 
+            self.padding, 
+            self.flip_red, 
+            self.flip_green, 
+            self.flip_blue,
+            self.use_smoothing,
+            self.smooth_radius,
+            self.smooth_iterations
+        )
         
-        # Get selected polygons in Edit Mode
-        if original_mode == 'EDIT':
-            bm = bmesh.from_edit_mesh(mesh)
-            selected_poly_indices = {f.index for f in bm.faces if f.select}
-            bpy.ops.object.mode_set(mode='OBJECT')
-        
-        # If no selection, use all polygons
-        if not selected_poly_indices:
-            selected_poly_indices = {p.index for p in mesh.polygons}
-        
-        res = int(self.resolution)
-        
-        # Create image array
-        pixels = np.zeros((res, res, 4), dtype=np.float32)
-        pixels[:, :, 0] = 0.5  # R - neutral
-        pixels[:, :, 1] = 0.5  # G - neutral
-        pixels[:, :, 2] = 1.0  # B - neutral (+Z)
-        pixels[:, :, 3] = 1.0  # A
-        
-        mask = np.zeros((res, res), dtype=np.bool_)
-        
-        uv_layer = mesh.uv_layers.active
-        if uv_layer is None:
-            self.report({'ERROR'}, "No active UV layer")
+        if pixels is None:
             return {'CANCELLED'}
         
-        # Load stored custom normals from object (saved in .blend file)
-        stored_normals = load_normals_from_object(obj)
-        
-        if not stored_normals:
-            self.report({'WARNING'}, "No custom normals set. Use Spherical Picker first!")
-        
-        # Rasterize only selected polygons using stored custom normals
-        for poly in mesh.polygons:
-            if poly.index not in selected_poly_indices:
-                continue
-            loop_indices = list(poly.loop_indices)
-            uvs = [Vector((uv_layer.data[li].uv[0], uv_layer.data[li].uv[1])) for li in loop_indices]
-            
-            # Get stored normal for this polygon, or use default (0, 0, 1) = blue
-            if poly.index in stored_normals:
-                nx, ny, nz = stored_normals[poly.index]
-                normal = Vector((nx, ny, nz))
-            else:
-                normal = Vector((0, 0, 1))  # Default: +Z (blue in normal map)
-            
-            # Fan triangulation
-            for i in range(1, len(loop_indices) - 1):
-                self._rasterize_solid(
-                    pixels, mask, res,
-                    [uvs[0], uvs[i], uvs[i + 1]],
-                    normal,
-                    flip_x=self.flip_red,
-                    flip_y=self.flip_green,
-                    flip_z=self.flip_blue
-                )
-        
-        # Apply padding
-        if self.padding > 0:
-            self._apply_padding(pixels, mask, self.padding)
-        
         # Save image
-        img = bpy.data.images.new("NormalMapBake", width=res, height=res, alpha=False)
+        img = bpy.data.images.new("NormalMapBake", width=width, height=height, alpha=False)
         img.pixels = pixels.flatten().tolist()
         img.filepath_raw = bpy.path.abspath(self.filepath)
         img.file_format = 'PNG'
         img.save()
         
-        if original_mode == 'EDIT':
-            bpy.ops.object.mode_set(mode='EDIT')
-        
         self.report({'INFO'}, f"Normal map saved to {self.filepath}")
         return {'FINISHED'}
-    
-    def _rasterize_solid(self, pixels, mask, res, uvs, normal, flip_x=False, flip_y=False, flip_z=False):
-        """Fill triangle with a single solid color"""
-        p0 = (uvs[0].x * res, uvs[0].y * res)
-        p1 = (uvs[1].x * res, uvs[1].y * res)
-        p2 = (uvs[2].x * res, uvs[2].y * res)
-        
-        # Pre-compute color (flip RGB channels independently)
-        r = (-normal.x * 0.5 + 0.5) if flip_x else (normal.x * 0.5 + 0.5)
-        g = (-normal.y * 0.5 + 0.5) if flip_y else (normal.y * 0.5 + 0.5)
-        b = (-normal.z * 0.5 + 0.5) if flip_z else (normal.z * 0.5 + 0.5)
-        
-        min_x = max(0, int(min(p0[0], p1[0], p2[0])))
-        max_x = min(res - 1, int(max(p0[0], p1[0], p2[0])) + 1)
-        min_y = max(0, int(min(p0[1], p1[1], p2[1])))
-        max_y = min(res - 1, int(max(p0[1], p1[1], p2[1])) + 1)
-        
-        for y in range(min_y, max_y + 1):
-            for x in range(min_x, max_x + 1):
-                bc = self._barycentric(p0, p1, p2, (x + 0.5, y + 0.5))
-                if bc and bc[0] >= 0 and bc[1] >= 0 and bc[2] >= 0:
-                    pixels[y, x, 0] = r
-                    pixels[y, x, 1] = g
-                    pixels[y, x, 2] = b
-                    pixels[y, x, 3] = 1.0
-                    mask[y, x] = True
-    
 
+
+def bake_normal_map_process(context, obj, res, padding, flip_r, flip_g, flip_b, use_smooth, smooth_rad, smooth_iter):
+    """Shared logic for baking and smoothing"""
+    mesh = obj.data
     
-    def _barycentric(self, p0, p1, p2, p):
-        """Calculate barycentric coordinates for point p in triangle p0,p1,p2.
-        Returns weights (w0, w1, w2) such that P = w0*p0 + w1*p1 + w2*p2"""
-        v0 = (p1[0] - p0[0], p1[1] - p0[1])  # p1 - p0
-        v1 = (p2[0] - p0[0], p2[1] - p0[1])  # p2 - p0
-        v2 = (p[0] - p0[0], p[1] - p0[1])    # p - p0
+    original_mode = obj.mode
+    selected_poly_indices = set()
+    
+    # Get selected polygons in Edit Mode
+    if original_mode == 'EDIT':
+        bm = bmesh.from_edit_mesh(mesh)
+        selected_poly_indices = {f.index for f in bm.faces if f.select}
+        bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # If no selection, use all polygons
+    if not selected_poly_indices:
+        selected_poly_indices = {p.index for p in mesh.polygons}
+    
+    # Create image array
+    pixels = np.zeros((res, res, 4), dtype=np.float32)
+    pixels[:, :, 0] = 0.5  # R - neutral
+    pixels[:, :, 1] = 0.5  # G - neutral
+    pixels[:, :, 2] = 1.0  # B - neutral (+Z)
+    pixels[:, :, 3] = 1.0  # A
+    
+    mask = np.zeros((res, res), dtype=np.bool_)
+    
+    uv_layer = mesh.uv_layers.active
+    if uv_layer is None:
+        # We need a way to report error, but since this is helper, print?
+        # Or better check caller.
+        # Assuming caller checks basic requirements, but safety:
+        if original_mode == 'EDIT':
+            bpy.ops.object.mode_set(mode='EDIT')
+        return None, 0, 0
+    
+    # Load stored custom normals from object (saved in .blend file)
+    stored_normals = load_normals_from_object(obj)
+    
+    # Rasterize only selected polygons using stored custom normals
+    for poly in mesh.polygons:
+        if poly.index not in selected_poly_indices:
+            continue
+        loop_indices = list(poly.loop_indices)
+        uvs = [Vector((uv_layer.data[li].uv[0], uv_layer.data[li].uv[1])) for li in loop_indices]
         
+        # Get stored normal for this polygon, or use default (0, 0, 1) = blue
+        if poly.index in stored_normals:
+            nx, ny, nz = stored_normals[poly.index]
+            normal = Vector((nx, ny, nz))
+        else:
+            normal = Vector((0, 0, 1))  # Default: +Z (blue in normal map)
+        
+        # Helper to rasterize
+        # We need to access a method to rasterize. Since we moved this out of class, 
+        # let's define rasterize as inner function or standalone.
+        # Standalone is cleaner.
+        
+        # Fan triangulation
+        for i in range(1, len(loop_indices) - 1):
+             _rasterize_solid_standalone(
+                pixels, mask, res,
+                [uvs[0], uvs[i], uvs[i + 1]],
+                normal,
+                flip_x=flip_r,
+                flip_y=flip_g,
+                flip_z=flip_b
+            )
+    
+    # Apply padding
+    if padding > 0:
+        _apply_padding_standalone(pixels, mask, padding)
+    
+    # Apply post-processing smoothing
+    if use_smooth:
+        _apply_smoothing_standalone(pixels, smooth_rad, smooth_iter)
+        
+    if original_mode == 'EDIT':
+        bpy.ops.object.mode_set(mode='EDIT')
+        
+    return pixels, res, res
+
+
+def _rasterize_solid_standalone(pixels, mask, res, uvs, normal, flip_x=False, flip_y=False, flip_z=False):
+    """Fill triangle with a single solid color"""
+    p0 = (uvs[0].x * res, uvs[0].y * res)
+    p1 = (uvs[1].x * res, uvs[1].y * res)
+    p2 = (uvs[2].x * res, uvs[2].y * res)
+    
+    # Pre-compute color (flip RGB channels independently)
+    r = (-normal.x * 0.5 + 0.5) if flip_x else (normal.x * 0.5 + 0.5)
+    g = (-normal.y * 0.5 + 0.5) if flip_y else (normal.y * 0.5 + 0.5)
+    b = (-normal.z * 0.5 + 0.5) if flip_z else (normal.z * 0.5 + 0.5)
+    
+    min_x = max(0, int(min(p0[0], p1[0], p2[0])))
+    max_x = min(res - 1, int(max(p0[0], p1[0], p2[0])) + 1)
+    min_y = max(0, int(min(p0[1], p1[1], p2[1])))
+    max_y = min(res - 1, int(max(p0[1], p1[1], p2[1])) + 1)
+    
+    # Barycentric helper
+    def barycentric(p0, p1, p2, p):
+        v0 = (p1[0] - p0[0], p1[1] - p0[1])
+        v1 = (p2[0] - p0[0], p2[1] - p0[1])
+        v2 = (p[0] - p0[0], p[1] - p0[1])
         d00 = v0[0] * v0[0] + v0[1] * v0[1]
         d01 = v0[0] * v1[0] + v0[1] * v1[1]
         d02 = v0[0] * v2[0] + v0[1] * v2[1]
         d11 = v1[0] * v1[0] + v1[1] * v1[1]
         d12 = v1[0] * v2[0] + v1[1] * v2[1]
-        
         denom = d00 * d11 - d01 * d01
-        if abs(denom) < 1e-10:
-            return None
-        
+        if abs(denom) < 1e-10: return None
         inv = 1.0 / denom
-        u = (d11 * d02 - d01 * d12) * inv  # weight for p1
-        v = (d00 * d12 - d01 * d02) * inv  # weight for p2
-        w = 1.0 - u - v                     # weight for p0
-        
-        return (w, u, v)  # (p0_weight, p1_weight, p2_weight)
+        u = (d11 * d02 - d01 * d12) * inv
+        v = (d00 * d12 - d01 * d02) * inv
+        w = 1.0 - u - v
+        return (w, u, v)
+
+    for y in range(min_y, max_y + 1):
+        for x in range(min_x, max_x + 1):
+            bc = barycentric(p0, p1, p2, (x + 0.5, y + 0.5))
+            if bc and bc[0] >= 0 and bc[1] >= 0 and bc[2] >= 0:
+                pixels[y, x, 0] = r
+                pixels[y, x, 1] = g
+                pixels[y, x, 2] = b
+                pixels[y, x, 3] = 1.0
+                mask[y, x] = True
+
+def _apply_padding_standalone(pixels, mask, padding_size):
+    padded = pixels.copy()
+    current_mask = mask.copy()
+    res = pixels.shape[0]
     
-    def _apply_padding(self, pixels, mask, padding_size):
-        padded = pixels.copy()
-        current_mask = mask.copy()
-        res = pixels.shape[0]
+    for _ in range(padding_size):
+        new_mask = current_mask.copy()
+        for y in range(res):
+            for x in range(res):
+                if current_mask[y, x]:
+                    continue
+                neighbors = []
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < res and 0 <= nx < res and current_mask[ny, nx]:
+                        neighbors.append((ny, nx))
+                if neighbors:
+                    r, g, b = 0.0, 0.0, 0.0
+                    for ny, nx in neighbors:
+                        r += padded[ny, nx, 0]
+                        g += padded[ny, nx, 1]
+                        b += padded[ny, nx, 2]
+                    n = len(neighbors)
+                    padded[y, x] = [r/n, g/n, b/n, 1.0]
+                    new_mask[y, x] = True
+        current_mask = new_mask
+    pixels[:] = padded
+
+def _apply_smoothing_standalone(pixels, radius, iterations):
+    """Apply simple Box blur to pixels (Iterative)"""
+    res = pixels.shape[0]
+    
+    for _ in range(iterations):
+        temp = np.zeros_like(pixels)
+        weight_sum = np.zeros((res, res, 1), dtype=np.float32)
         
-        for _ in range(padding_size):
-            new_mask = current_mask.copy()
-            for y in range(res):
-                for x in range(res):
-                    if current_mask[y, x]:
-                        continue
-                    neighbors = []
-                    for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < res and 0 <= nx < res and current_mask[ny, nx]:
-                            neighbors.append((ny, nx))
-                    if neighbors:
-                        r, g, b = 0.0, 0.0, 0.0
-                        for ny, nx in neighbors:
-                            r += padded[ny, nx, 0]
-                            g += padded[ny, nx, 1]
-                            b += padded[ny, nx, 2]
-                        n = len(neighbors)
-                        padded[y, x] = [r/n, g/n, b/n, 1.0]
-                        new_mask[y, x] = True
-            current_mask = new_mask
-        pixels[:] = padded
+        # Simple Box Blur
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                shifted = np.roll(pixels, (dy, dx), axis=(0, 1))
+                # Note: Roll wraps around. For U-wraps this is actually good? 
+                # Ideally we mask by valid pixels but simple avergage is robust enough for baking context.
+                temp += shifted
+                weight_sum += 1.0
+        
+        pixels[:] = temp / weight_sum
+        
+        # Re-normalize normals
+        rgb = pixels[:, :, :3]
+        alpha = pixels[:, :, 3:]
+        
+        normals = rgb * 2.0 - 1.0
+        norms = np.linalg.norm(normals, axis=2, keepdims=True)
+        norms[norms == 0] = 1.0
+        normals /= norms
+        
+        pixels[:, :, :3] = normals * 0.5 + 0.5
+        pixels[:, :, 3:] = alpha
+
+
+class MESH_OT_preview_bake_normal_map(bpy.types.Operator):
+    """Preview baked normal map in Image Editor without saving"""
+    bl_idname = "mesh.preview_bake_normal_map"
+    bl_label = "Preview Bake"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    # We need settings to be accessible. Since this operator doesn't have the props popup by default
+    # unless we define them or call invoke.
+    # To share settings with the Bake operator properties, we should probably read from Scene or
+    # let the user adjust settings in the panel BEFORE clicking Preview.
+    # But currently settings are checking in the Operator Props.
+    # We should add scene properties for these settings if we want a shared "Panel" interface.
+    # HOWEVER, the Bake operator used operator properties.
+    # Let's add simple properties to this operator too, but maybe just grab defaults?
+    # No, better: Let's move the Bake settings to Scene/Global settings so both operators share them.
+    # BUT, to follow the request simply: I'll make this operator use the Scene settings we will Add.
+    # Wait, the previous code had settings in the Operator. 
+    # Moving them to Scene is a bigger refactor.
+    # Let's simply duplicate the properties here OR assume the user wants to preview with "Default" settings?
+    # No, that's useless.
+    # Let's ADD these properties to the LocalNormalSettings (Scene) so they are persistent and shared!
+    
+    def execute(self, context):
+        settings = context.scene.local_normal_editor
+        obj = context.active_object
+        
+        pixels, width, height = bake_normal_map_process(
+            context, 
+            obj, 
+            int(settings.bake_resolution), 
+            settings.bake_padding, 
+            settings.bake_flip_red, 
+            settings.bake_flip_green, 
+            settings.bake_flip_blue,
+            settings.bake_use_smoothing,
+            settings.bake_smooth_radius,
+            settings.bake_smooth_iterations
+        )
+        
+        if pixels is None:
+            return {'CANCELLED'}
+        
+        image_name = "Normal Map Preview"
+        img = bpy.data.images.get(image_name)
+        if not img:
+            img = bpy.data.images.new(image_name, width=width, height=height, alpha=False)
+        else:
+            if img.size[0] != width or img.size[1] != height:
+                img.scale(width, height)
+        
+        img.pixels = pixels.flatten().tolist()
+        
+        # Check if "Normal Map Preview" is already being displayed in any window
+        found_existing = False
+        for win in context.window_manager.windows:
+            for area in win.screen.areas:
+                if area.type == 'IMAGE_EDITOR':
+                    # Check if this area is showing our image
+                    if area.spaces.active.image == img:
+                        found_existing = True
+                        area.tag_redraw()
+                        # We could also break here, but maybe update all if multiple?
+                        # Let's break to avoid redundant checks, assume one is enough context.
+                        # But loop continues to update all instances if user split screens.
+        
+        if found_existing:
+            self.report({'INFO'}, "Preview updated")
+            return {'FINISHED'}
+            
+        # Strategy: Create new window. It usually becomes context.window or we iterate to find it.
+        current_windows = set(context.window_manager.windows)
+        bpy.ops.wm.window_new()
+        new_windows = set(context.window_manager.windows) - current_windows
+        
+        if new_windows:
+            new_window = list(new_windows)[0]
+            # The new window typically has one screen with one area (copy of previous)
+            # Let's verify and change it
+            area = new_window.screen.areas[0]
+            area.type = 'IMAGE_EDITOR'
+            area.spaces.active.image = img
+        
+        self.report({'INFO'}, "Preview opened in new window")
+        return {'FINISHED'}
+
 
 
 # -----------------------------------------------------------------------------
@@ -1210,17 +1289,35 @@ class VIEW3D_PT_local_normal_editor(bpy.types.Panel):
         
         layout.separator()
         
-        # Smooth
-        layout.label(text="Processing")
-        col = layout.column(align=True)
-        col.operator("mesh.smooth_custom_normals", text="Smooth Normals", icon='MOD_SMOOTH')
-        col.prop(settings, "smooth_factor", text="Factor")
-        col.prop(settings, "smooth_iterations", text="Iterations")
+
         
         layout.separator()
         
         # Bake
-        layout.operator("mesh.bake_custom_normal_map", text="Bake Normal Map", icon='IMAGE_DATA')
+        layout.label(text="Bake & Export")
+        
+        col = layout.column(align=True)
+        col.prop(settings, "bake_resolution")
+        col.prop(settings, "bake_padding")
+        
+        col.separator()
+        col.prop(settings, "bake_use_smoothing")
+        if settings.bake_use_smoothing:
+            col.prop(settings, "bake_smooth_radius")
+            col.prop(settings, "bake_smooth_iterations")
+            
+        col.separator()
+        row = col.row()
+        row.prop(settings, "bake_flip_red", text="Flip X")
+        row.prop(settings, "bake_flip_green", text="Flip Y")
+        row.prop(settings, "bake_flip_blue", text="Flip Z")
+        
+        layout.separator()
+        
+        row = layout.row(align=True)
+        row.scale_y = 1.2
+        row.operator("mesh.preview_bake_normal_map", text="Preview", icon='RESTRICT_VIEW_OFF')
+        row.operator("mesh.bake_custom_normal_map", text="Export...", icon='EXPORT')
 
 
 class VIEW3D_PT_local_normal_display(bpy.types.Panel):
@@ -1256,9 +1353,9 @@ classes = (
     MESH_OT_spherical_popup,
     MESH_OT_clear_custom_normals,
     MESH_OT_mark_all_sharp,
-    MESH_OT_smooth_custom_normals,
     MESH_OT_toggle_toon_preview,
     MESH_OT_bake_normal_map,
+    MESH_OT_preview_bake_normal_map,
     VIEW3D_PT_local_normal_editor,
     VIEW3D_PT_local_normal_display,
 )
