@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 10),
+    "version": (0, 0, 11),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -378,22 +378,21 @@ class LocalNormalSettings(bpy.types.PropertyGroup):
 # -----------------------------------------------------------------------------
 # Spherical Popup Picker
 
-
 class MESH_OT_spherical_popup(bpy.types.Operator):
-    """Open a popup to visually select normal direction on a sphere"""
+    """Open a popup to visually select normal direction using angle picker"""
     bl_idname = "mesh.spherical_normal_popup"
-    bl_label = "Spherical Normal Picker"
+    bl_label = "Normal Angle Picker"
     bl_options = {'REGISTER', 'UNDO'}
 
     _handle = None
     _yaw = 0.0
     _pitch = 0.0
     _dragging = False
-    _flipped = False  # True = back hemisphere
     _popup_x = 0
     _popup_y = 0
-    _sphere_radius = 100
-    _original_normals = None  # Store original normals for cancel
+    _width = 240   # Rectangle width (Yaw: -180 to +180)
+    _height = 120  # Rectangle height (Pitch: -90 to +90)
+    _original_normals = None
     _selected_loops = None
     _mirror_map = None
 
@@ -407,13 +406,10 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
             self.report({'WARNING'}, "View3D not found")
             return {'CANCELLED'}
 
-        # Initialize from current settings
         settings = context.scene.local_normal_editor
         self._yaw = settings.yaw
         self._pitch = settings.pitch
-        self._flipped = False
 
-        # Store original normals for cancel
         obj = context.active_object
         mesh = obj.data
         bm = bmesh.from_edit_mesh(mesh)
@@ -423,7 +419,6 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
             self.report({'WARNING'}, "Please select faces first")
             return {'CANCELLED'}
         
-        # Setup mirror map if mirror is enabled
         if settings.mirror_axis != 'NONE':
             self._mirror_map = find_mirror_loops(bm, self._selected_loops, settings.mirror_axis)
         else:
@@ -433,12 +428,10 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         self._original_normals = [Vector(cn.vector) for cn in mesh.corner_normals]
         bpy.ops.object.mode_set(mode='EDIT')
 
-        # Center popup in the region
         region = context.region
         self._popup_x = region.width // 2
         self._popup_y = region.height // 2
 
-        # Add draw handler
         self._handle = bpy.types.SpaceView3D.draw_handler_add(
             self.draw_callback, (context,), 'WINDOW', 'POST_PIXEL'
         )
@@ -446,7 +439,7 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         context.window_manager.modal_handler_add(self)
         context.area.tag_redraw()
 
-        self.report({'INFO'}, "Drag on sphere to set direction. Enter=Apply, Esc=Cancel")
+        self.report({'INFO'}, "Drag to set angle. Enter=Apply, Esc=Cancel")
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
@@ -454,13 +447,15 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
 
         dx = event.mouse_region_x - self._popup_x
         dy = event.mouse_region_y - self._popup_y
-        in_sphere = (dx * dx + dy * dy) <= (self._sphere_radius * self._sphere_radius)
+        half_w = self._width // 2
+        half_h = self._height // 2
+        in_rect = abs(dx) <= half_w and abs(dy) <= half_h
 
         if event.type == 'LEFTMOUSE':
-            if event.value == 'PRESS' and in_sphere:
+            if event.value == 'PRESS' and in_rect:
                 self._dragging = True
                 self.update_angles_from_mouse(dx, dy, context)
-                self.apply_current_normal(context)  # Apply immediately
+                self.apply_current_normal(context)
                 return {'RUNNING_MODAL'}
             elif event.value == 'RELEASE':
                 self._dragging = False
@@ -469,11 +464,10 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         elif event.type == 'MOUSEMOVE':
             if self._dragging:
                 self.update_angles_from_mouse(dx, dy, context)
-                self.apply_current_normal(context)  # Apply immediately
+                self.apply_current_normal(context)
             return {'RUNNING_MODAL'}
 
         elif event.type in {'RET', 'NUMPAD_ENTER'} and event.value == 'PRESS':
-            # Confirm and close (normals already applied)
             settings = context.scene.local_normal_editor
             settings.yaw = self._yaw
             settings.pitch = self._pitch
@@ -482,13 +476,7 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
             self.cleanup(context)
             return {'FINISHED'}
 
-        elif event.type == 'F' and event.value == 'PRESS':
-            # Flip sphere (toggle front/back hemisphere)
-            self._flipped = not self._flipped
-            return {'RUNNING_MODAL'}
-
         elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
-            # Cancel - restore original normals
             self.restore_original_normals(context)
             self.cleanup(context)
             self.report({'INFO'}, "Cancelled - normals restored")
@@ -497,29 +485,18 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         return {'PASS_THROUGH'}
 
     def update_angles_from_mouse(self, dx, dy, context):
-        """Convert 2D mouse position to spherical angles"""
+        """Convert 2D mouse position directly to Yaw/Pitch angles"""
         settings = context.scene.local_normal_editor
-        r = self._sphere_radius
+        half_w = self._width // 2
+        half_h = self._height // 2
 
-        nx = max(-1, min(1, dx / r))
-        ny = max(-1, min(1, dy / r))
+        # Clamp to rectangle bounds
+        dx = max(-half_w, min(half_w, dx))
+        dy = max(-half_h, min(half_h, dy))
 
-        dist_sq = nx * nx + ny * ny
-        if dist_sq > 1.0:
-            dist = math.sqrt(dist_sq)
-            nx /= dist
-            ny /= dist
-            dist_sq = 1.0
-
-        nz = math.sqrt(max(0, 1.0 - dist_sq))
-        
-        # Flip direction if viewing back hemisphere
-        if self._flipped:
-            nz = -nz
-        
-        vec = Vector((nx, -nz, ny))
-
-        yaw, pitch = vector_to_spherical(vec)
+        # Direct mapping: X -> Yaw (-180 to +180), Y -> Pitch (-90 to +90)
+        yaw = (dx / half_w) * math.pi      # -π to +π
+        pitch = (dy / half_h) * (math.pi / 2)  # -π/2 to +π/2
 
         if settings.use_snap:
             yaw = snap_angle(yaw)
@@ -538,19 +515,16 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         bpy.ops.object.mode_set(mode='OBJECT')
         normals = [Vector(cn.vector) for cn in mesh.corner_normals]
         
-        # Load existing stored normals and update
         stored_normals = load_normals_from_object(obj)
         
-        # Find which polygons these loops belong to and store
         for poly in mesh.polygons:
             poly_loops = set(poly.loop_indices)
-            if poly_loops & self._selected_loops:  # If any selected loop is in this poly
+            if poly_loops & self._selected_loops:
                 stored_normals[poly.index] = (normal.x, normal.y, normal.z)
         
         for loop_idx in self._selected_loops:
             normals[loop_idx] = normal
         
-        # Apply mirrored normals
         if self._mirror_map:
             axis_idx = {'X': 0, 'Y': 1, 'Z': 2}[settings.mirror_axis]
             mirrored_normal = normal.copy()
@@ -559,19 +533,15 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
             for orig_idx, mirror_idx in self._mirror_map.items():
                 normals[mirror_idx] = mirrored_normal
             
-            # Also store mirrored normals
             for poly in mesh.polygons:
                 poly_loops = set(poly.loop_indices)
                 mirror_loops = set(self._mirror_map.values())
                 if poly_loops & mirror_loops:
                     stored_normals[poly.index] = (mirrored_normal.x, mirrored_normal.y, mirrored_normal.z)
         
-        # Save to object custom property (persists in .blend file)
         save_normals_to_object(obj, stored_normals)
-        
         mesh.normals_split_custom_set(normals)
         
-        # Update preview if active
         if _toon_preview_state["handler"]:
             update_toon_preview_batch(context)
             context.area.tag_redraw()
@@ -590,90 +560,94 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         bpy.ops.object.mode_set(mode='EDIT')
 
     def draw_callback(self, context):
-        """Draw the spherical picker"""
+        """Draw the angle picker rectangle"""
         cx = self._popup_x
         cy = self._popup_y
-        r = self._sphere_radius
+        w = self._width
+        h = self._height
+        half_w = w // 2
+        half_h = h // 2
 
-        # Enable blending for transparency
         gpu.state.blend_set('ALPHA')
 
         # Background panel
-        self.draw_rect(cx - r - 20, cy - r - 50, (r + 20) * 2, (r + 20) * 2 + 70, (0.1, 0.1, 0.1, 0.9))
+        self.draw_rect(cx - half_w - 20, cy - half_h - 60, w + 40, h + 100, (0.1, 0.1, 0.1, 0.9))
 
-        # Sphere fill (different color for front/back)
-        if self._flipped:
-            self.draw_filled_circle(cx, cy, r, (0.25, 0.2, 0.2, 1.0))  # Reddish for back
-        else:
-            self.draw_filled_circle(cx, cy, r, (0.2, 0.2, 0.25, 1.0))  # Bluish for front
+        # Main rectangle area
+        self.draw_rect(cx - half_w, cy - half_h, w, h, (0.2, 0.2, 0.25, 1.0))
 
-        # Grid lines
-        self.draw_sphere_grid(cx, cy, r)
+        # Grid lines (every 15 degrees if snap enabled, else 30 degrees)
+        settings = context.scene.local_normal_editor
+        grid_step = 15 if settings.use_snap else 30
+        
+        # Vertical grid (Yaw)
+        for deg in range(-180, 181, grid_step):
+            x = cx + (deg / 180) * half_w
+            alpha = 0.6 if deg % 90 == 0 else 0.3
+            self.draw_line(x, cy - half_h, x, cy + half_h, (0.5, 0.5, 0.5, alpha), 1.0)
+        
+        # Horizontal grid (Pitch)
+        for deg in range(-90, 91, grid_step):
+            y = cy + (deg / 90) * half_h
+            alpha = 0.6 if deg % 45 == 0 else 0.3
+            self.draw_line(cx - half_w, y, cx + half_w, y, (0.5, 0.5, 0.5, alpha), 1.0)
 
-        # Sphere outline
-        self.draw_circle_outline(cx, cy, r, (0.6, 0.6, 0.6, 1.0), 64)
+        # Center crosshair (0,0)
+        self.draw_line(cx - half_w, cy, cx + half_w, cy, (0.6, 0.6, 0.6, 0.8), 2.0)
+        self.draw_line(cx, cy - half_h, cx, cy + half_h, (0.6, 0.6, 0.6, 0.8), 2.0)
 
-        # Current direction indicator
-        normal = spherical_to_vector(self._yaw, self._pitch)
-        px = cx + normal.x * r
-        py = cy + normal.z * r
+        # Rectangle outline
+        self.draw_rect_outline(cx - half_w, cy - half_h, w, h, (0.7, 0.7, 0.7, 1.0))
 
-        # Show indicator based on which hemisphere we're viewing
-        show_indicator = (normal.y < 0 and not self._flipped) or (normal.y > 0 and self._flipped)
-        if show_indicator:
-            self.draw_line(cx, cy, px, py, (1.0, 0.5, 0.1, 1.0), 3.0)
-            self.draw_filled_circle(px, py, 10, (1.0, 0.4, 0.1, 1.0))
-            self.draw_circle_outline(px, py, 10, (1.0, 1.0, 1.0, 1.0), 16)
-
-        # Center point
-        self.draw_filled_circle(cx, cy, 5, (0.4, 0.4, 0.4, 1.0))
-
-        # Text
+        # Current position indicator
         yaw_deg = math.degrees(self._yaw)
         pitch_deg = math.degrees(self._pitch)
+        px = cx + (yaw_deg / 180) * half_w
+        py = cy + (pitch_deg / 90) * half_h
+        
+        # Draw crosshair at current position
+        self.draw_line(px - 8, py, px + 8, py, (1.0, 0.4, 0.1, 1.0), 2.0)
+        self.draw_line(px, py - 8, px, py + 8, (1.0, 0.4, 0.1, 1.0), 2.0)
+        self.draw_filled_circle(px, py, 6, (1.0, 0.5, 0.1, 1.0))
+        self.draw_circle_outline(px, py, 6, (1.0, 1.0, 1.0, 1.0), 16)
 
+        # Title
         blf.size(0, 16)
         blf.color(0, 1.0, 1.0, 1.0, 1.0)
-        blf.position(0, cx - 80, cy + r + 30, 0)
-        side_text = "[Back]" if self._flipped else "[Front]"
-        blf.draw(0, f"Spherical Picker {side_text}")
+        blf.position(0, cx - 55, cy + half_h + 25, 0)
+        blf.draw(0, "Normal Angle Picker")
 
+        # Angle display
         blf.size(0, 14)
-        blf.position(0, cx - 70, cy - r - 30, 0)
+        blf.position(0, cx - 70, cy - half_h - 25, 0)
         blf.draw(0, f"Yaw: {yaw_deg:.0f}°  Pitch: {pitch_deg:.0f}°")
 
+        # Instructions
         blf.size(0, 12)
         blf.color(0, 0.6, 0.6, 0.6, 1.0)
-        blf.position(0, cx - 95, cy - r - 50, 0)
-        blf.draw(0, "Enter=Confirm  F=Flip  Esc=Cancel")
+        blf.position(0, cx - 70, cy - half_h - 45, 0)
+        blf.draw(0, "Enter=Confirm  Esc=Cancel")
 
-        # Direction labels
+        # Axis labels
         blf.color(0, 0.5, 0.8, 1.0, 1.0)
-        blf.position(0, cx - 8, cy + r + 8, 0)
-        blf.draw(0, "Up")
-        blf.position(0, cx - 14, cy - r - 18, 0)
-        blf.draw(0, "Down")
-        blf.position(0, cx + r + 8, cy - 5, 0)
-        blf.draw(0, "R")
-        blf.position(0, cx - r - 18, cy - 5, 0)
-        blf.draw(0, "L")
+        blf.size(0, 11)
+        blf.position(0, cx - half_w - 15, cy - 5, 0)
+        blf.draw(0, "-180°")
+        blf.position(0, cx + half_w + 3, cy - 5, 0)
+        blf.draw(0, "+180°")
+        blf.position(0, cx - 12, cy + half_h + 5, 0)
+        blf.draw(0, "+90°")
+        blf.position(0, cx - 12, cy - half_h - 15, 0)
+        blf.draw(0, "-90°")
+        
+        # Axis names
+        blf.color(0, 0.7, 0.7, 0.7, 1.0)
+        blf.position(0, cx + half_w + 3, cy + half_h - 10, 0)
+        blf.draw(0, "Yaw")
+        blf.position(0, cx - half_w - 5, cy + half_h + 5, 0)
+        blf.draw(0, "Pitch")
 
         gpu.state.blend_set('NONE')
-
-    def draw_sphere_grid(self, cx, cy, r):
-        """Draw grid lines on sphere"""
-        # Horizontal lines (latitude)
-        for i in [-2, -1, 1, 2]:
-            angle = math.radians(i * 30)
-            y_offset = math.sin(angle) * r
-            lat_r = math.cos(angle) * r
-            self.draw_circle_outline(cx, cy + y_offset, lat_r, (0.35, 0.35, 0.35, 0.8), 32)
-
-        # Vertical line (center meridian)
-        self.draw_line(cx, cy - r, cx, cy + r, (0.35, 0.35, 0.35, 0.8), 1.0)
-        
-        # Horizontal center line
-        self.draw_line(cx - r, cy, cx + r, cy, (0.35, 0.35, 0.35, 0.8), 1.0)
 
     def draw_rect(self, x, y, w, h, color):
         """Draw filled rectangle"""
@@ -685,9 +659,19 @@ class MESH_OT_spherical_popup(bpy.types.Operator):
         shader.uniform_float("color", color)
         batch.draw(shader)
 
+    def draw_rect_outline(self, x, y, w, h, color):
+        """Draw rectangle outline"""
+        verts = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+        indices = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+        batch = batch_for_shader(shader, 'LINES', {"pos": verts}, indices=indices)
+        shader.bind()
+        shader.uniform_float("color", color)
+        batch.draw(shader)
+
     def draw_filled_circle(self, cx, cy, radius, color):
         """Draw filled circle"""
-        segments = 32
+        segments = 16
         verts = [(cx, cy)]
         for i in range(segments + 1):
             angle = 2 * math.pi * i / segments
@@ -1198,10 +1182,10 @@ class VIEW3D_PT_local_normal_editor(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.local_normal_editor
 
-        # Spherical Picker (Main Feature)
+        # Angle Picker (Main Feature)
         col = layout.column(align=True)
         col.scale_y = 1.5
-        col.operator("mesh.spherical_normal_popup", text="Spherical Picker", icon='SPHERE')
+        col.operator("mesh.spherical_normal_popup", text="Angle Picker", icon='ORIENTATION_GIMBAL')
         
         col = layout.column(align=True)
         col.prop(settings, "use_snap")
