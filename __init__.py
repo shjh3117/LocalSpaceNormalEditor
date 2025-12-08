@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Local Space Normal Editor",
     "author": "shjh3117",
-    "version": (0, 0, 8),
+    "version": (0, 0, 9),
     "blender": (4, 1, 0),
     "location": "View3D > Sidebar > Edit Tab",
     "description": "Edit custom normals in local space with spherical picker",
@@ -358,6 +358,20 @@ class LocalNormalSettings(bpy.types.PropertyGroup):
             ('Z', "Z", "Mirror across Z axis"),
         ],
         default='NONE',
+    )
+    smooth_factor: FloatProperty(
+        name="Smooth Factor",
+        description="Strength of the smoothing effect",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+    )
+    smooth_iterations: IntProperty(
+        name="Iterations",
+        description="Number of smoothing passes",
+        default=3,
+        min=1,
+        max=20,
     )
 
 
@@ -745,6 +759,132 @@ class MESH_OT_clear_custom_normals(bpy.types.Operator):
         return {'FINISHED'}
 
 
+
+# -----------------------------------------------------------------------------
+# Smooth Custom Normals
+
+class MESH_OT_smooth_custom_normals(bpy.types.Operator):
+    """Smooth custom normals using Gaussian-like filter"""
+    bl_idname = "mesh.smooth_custom_normals"
+    bl_label = "Smooth Custom Normals"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        settings = context.scene.local_normal_editor
+        
+        # Load stored normals
+        stored_normals = load_normals_from_object(obj) # {poly_index: (x, y, z)}
+        if not stored_normals:
+            self.report({'WARNING'}, "No custom normals found to smooth")
+            return {'CANCELLED'}
+
+        # Build connectivity map: face_idx -> list of connected face_indices
+        # Two faces are connected if they share at least one vertex
+        vert_to_faces = {} # vert_idx -> [face_idx, ...]
+        for poly in mesh.polygons:
+            for v_idx in poly.vertices:
+                if v_idx not in vert_to_faces:
+                    vert_to_faces[v_idx] = []
+                vert_to_faces[v_idx].append(poly.index)
+        
+        face_neighbors = {} # face_idx -> set(neighbor_face_indices)
+        for poly in mesh.polygons:
+            neighbors = set()
+            for v_idx in poly.vertices:
+                for neighbor_idx in vert_to_faces[v_idx]:
+                    if neighbor_idx != poly.index:
+                        neighbors.add(neighbor_idx)
+            face_neighbors[poly.index] = neighbors
+            
+        # Smoothing iterations
+        current_normals = stored_normals.copy()
+        factor = settings.smooth_factor
+        
+        self.report({'INFO'}, f"Smoothing normals... (Factor: {factor}, Iterations: {settings.smooth_iterations})")
+        
+        for i in range(settings.smooth_iterations):
+            next_normals = {}
+            for poly_idx, current_normal_tuple in current_normals.items():
+                current_normal = Vector(current_normal_tuple)
+                
+                # Gather neighbor normals
+                neighbor_sum = Vector((0, 0, 0))
+                count = 0
+                
+                # Check if neighbors have custom normals
+                neighbors = face_neighbors.get(poly_idx, set())
+                for n_idx in neighbors:
+                    if n_idx in current_normals:
+                        neighbor_sum += Vector(current_normals[n_idx])
+                        count += 1
+                
+                if count > 0:
+                    avg_normal = neighbor_sum / count
+                    avg_normal.normalize()
+                    
+                    # Lerp: original -> average
+                    smoothed = current_normal.lerp(avg_normal, factor)
+                    smoothed.normalize()
+                    next_normals[poly_idx] = (smoothed.x, smoothed.y, smoothed.z)
+                else:
+                    next_normals[poly_idx] = current_normal_tuple
+            
+            current_normals = next_normals
+            
+        # Save back
+        save_normals_to_object(obj, current_normals)
+        
+        # Apply to mesh
+        # We need to apply these new normals to the loop normals of the mesh
+        # If a face has a custom normal, all its loops get that normal (flat shading style for custom normals per face)
+        
+        # 1. Get current loop normals (to keep non-custom ones intact if any mixed state exists, though we usually overwrite)
+        mesh.calc_normals_split()
+        loop_normals = [Vector(l.normal) for l in mesh.loops] # Fallback to auto
+        
+        # 2. But we want to apply OUR stored normals
+        # Create a list of normals for all loops
+        # If a poly has a stored normal, use it. Else use... what? 
+        # Usually we apply to ALL loops if we are using this system.
+        
+        # However, MESH_OT_apply_current_normal updates specific loops.
+        # Let's reconstruct the fill list.
+        
+        new_loop_normals = []
+        for poly in mesh.polygons:
+            if poly.index in current_normals:
+                nx, ny, nz = current_normals[poly.index]
+                n = Vector((nx, ny, nz))
+            else:
+                n = Vector((0, 0, 1)) # Fallback, shouldn't happen if we loaded them
+                # Or better, use the existing loop normal?
+                # For safety, let's look at the first loop of the poly
+                # But calculating split normals might be slow.
+                # Let's just assume we rely on stored normals for everything relevant.
+                
+            for _ in poly.loop_indices:
+                new_loop_normals.append(n)
+
+        # Apply
+        try:
+            mesh.normals_split_custom_set(new_loop_normals)
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to set normals: {e}")
+
+        # Update preview
+        if _toon_preview_state["handler"]:
+            update_toon_preview_batch(context)
+            context.area.tag_redraw()
+
+        return {'FINISHED'}
+
+
 # -----------------------------------------------------------------------------
 # Toon Preview Operator
 
@@ -1052,6 +1192,15 @@ class VIEW3D_PT_local_normal_editor(bpy.types.Panel):
         
         layout.separator()
         
+        # Smooth
+        layout.label(text="Processing")
+        col = layout.column(align=True)
+        col.operator("mesh.smooth_custom_normals", text="Smooth Normals", icon='MOD_SMOOTH')
+        col.prop(settings, "smooth_factor", text="Factor")
+        col.prop(settings, "smooth_iterations", text="Iterations")
+        
+        layout.separator()
+        
         # Bake
         layout.operator("mesh.bake_custom_normal_map", text="Bake Normal Map", icon='IMAGE_DATA')
 
@@ -1084,6 +1233,7 @@ classes = (
     LocalNormalSettings,
     MESH_OT_spherical_popup,
     MESH_OT_clear_custom_normals,
+    MESH_OT_smooth_custom_normals,
     MESH_OT_toggle_toon_preview,
     MESH_OT_bake_normal_map,
     VIEW3D_PT_local_normal_editor,
